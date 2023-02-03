@@ -1,0 +1,343 @@
+/*
+  uart.c
+  Uart related function.
+*/
+#include "main.h"
+#include "nrf_log.h"
+
+
+st_Uart_t gst_Uart = {0};
+
+uint16_t data_length;
+void gnss_response(void);
+void UART_TxData(uint8_t *data, uint16_t lenght);
+void req_ack(uint8_t error);
+
+void uart_event_handle(app_uart_evt_t * p_event)
+{
+    uint32_t ret_val;
+    uint8_t DummyRx = 0;
+
+
+    switch (p_event->evt_type)
+    {
+        /**@snippet [Handling data from UART] */
+        case APP_UART_DATA_READY:
+        {
+            if (!gst_Uart.RX.isDataReceived)
+            {
+                if (gst_Uart.RX.DataLen < sizeof(gst_Uart.RX.Buf))
+                {
+                    UNUSED_VARIABLE(app_uart_get(&gst_Uart.RX.Buf[gst_Uart.RX.DataLen]));
+
+                    gst_Uart.RX.DataLen++;
+                    gst_Uart.RX.Timeout = _200ms;
+                    if (gst_Uart.RX.DataLen >= 3)
+                    {
+                        data_length = gst_Uart.RX.Buf[0] << 8;
+                        data_length |= gst_Uart.RX.Buf[1];
+                        NRF_LOG_DEBUG("Len = %02x", data_length);
+                        gst_Uart.RX.message_type = gst_Uart.RX.Buf[2];
+
+                        if ((data_length) < gst_Uart.RX.DataLen - 2)
+                        {
+                            memcpy(&gst_Uart.RX.Data,&gst_Uart.RX.Buf[3], (data_length - 2));
+                            gst_Uart.RX.Timeout = 0;
+                            gst_Uart.RX.isDataReceived = true;
+                        }
+                    }
+                }
+                else
+                {
+                }
+            }
+            else
+            {
+                app_uart_get(&DummyRx);
+            }
+
+            break;
+        }
+
+        /**@snippet [Handling data from UART] */
+        case APP_UART_COMMUNICATION_ERROR:
+            //            NRF_LOG_ERROR("Communication error occurred while handling UART.");
+            //            APP_ERROR_HANDLER(p_event->data.error_communication);
+            break;
+
+        case APP_UART_FIFO_ERROR:
+            //            NRF_LOG_ERROR("Error occurred in FIFO module used by UART.");
+            //            APP_ERROR_HANDLER(p_event->data.error_code);
+            break;
+
+        default:
+            break;
+    }
+}
+
+
+/**@brief Function for initializing the UART. */
+void uart_init(void)
+{
+    ret_code_t err_code;
+
+    app_uart_comm_params_t const comm_params = {.rx_pin_no = RX_PIN_NUMBER,
+        .tx_pin_no = TX_PIN_NUMBER,
+        //.rts_pin_no   = RTS_PIN_NUMBER,
+        //.cts_pin_no   = CTS_PIN_NUMBER,
+        .flow_control = APP_UART_FLOW_CONTROL_DISABLED,
+        .use_parity = false,
+        .baud_rate = UART_BAUDRATE_BAUDRATE_Baud115200};
+
+    APP_UART_FIFO_INIT(&comm_params, UART_RX_BUF_SIZE, UART_TX_BUF_SIZE, uart_event_handle,
+        APP_IRQ_PRIORITY_HIGHEST, err_code);
+
+    APP_ERROR_CHECK(err_code);
+}
+
+
+/**
+ * @brief Function to send string on UART
+ */
+void UART_PutString(const char * str)
+{
+    while (*str != NULL)
+    {
+        app_uart_put(*str);
+        str++;
+    }
+}
+
+/**
+ * @brief Function to send string on UART
+ */
+void UART_TxData(uint8_t * data, uint16_t lenght)
+{
+    // NRF_LOG_INFO("UART_Tx: %s", data);
+    // NRF_LOG_HEXDUMP_DEBUG(data, lenght);
+    while (lenght != 0)
+    {
+        app_uart_put(*data);
+        data++;
+        lenght--;
+    }
+    // NRF_LOG_INFO("UART_TxData Complete");
+}
+
+/**
+ * @brief Function to crc calculate
+ */
+
+uint16_t crc_calculate(uint16_t crc_rem, uint16_t no_of_bytes, uint8_t * msg)
+{
+    uint16_t mod = 0, i = 0;
+    uint8_t inner = 0;
+
+
+    for (i = 0; i < no_of_bytes; i++)
+    {
+        crc_rem ^= *(msg + i);
+        for (inner = 0; inner < 8; inner++)
+        {
+            mod = crc_rem & 0x0001;
+            crc_rem >>= 1;
+            if (mod)
+                crc_rem ^= 0xA001;
+        }
+    }
+    return crc_rem;
+}
+
+/**
+ * @brief Function to data valid or not
+     >> means crc is valid or not and decide to flag gst_Uart.RX.isDataValied true or false
+ */
+
+uint8_t uart_data_Valided(void)
+{
+    uint16_t Received_CRC = 0;
+    uint16_t CRCCalc = 0xFFFF;
+
+    CRCCalc = crc_calculate(0xFFFF, (gst_Uart.RX.DataLen-2) , &gst_Uart.RX.Buf[0]);
+
+    Received_CRC =  (uint16_t)gst_Uart.RX.Buf[gst_Uart.RX.DataLen-2] << 8;
+    Received_CRC |= (uint16_t)gst_Uart.RX.Buf[gst_Uart.RX.DataLen-1];
+
+
+    NRF_LOG_INFO("C_CRC: %02X R_CRC: %02X\r\n",CRCCalc,Received_CRC);
+    if (CRCCalc == Received_CRC)
+    {
+        NRF_LOG_INFO("DATA CRC MATCH \r\n");
+        return true;
+    }
+    else
+    {
+        NRF_LOG_INFO("DATA CRC NOT MATCH \r\n");
+        memset(&gst_Uart, 0, sizeof(gst_Uart));
+        return false;
+    }
+}
+
+/**
+ * @brief Function to message type in uart test
+ */
+
+void uart_data_process(void)
+{
+  
+    switch (gst_Uart.RX.message_type)
+    {
+        case GNSS_TEST:
+        {
+            uint16_t lu16_Time;
+
+            lu16_Time = gst_Uart.RX.Data[0] << 8;
+            lu16_Time |= gst_Uart.RX.Data[1];
+
+            NRF_LOG_INFO("GNSS TEST dATA : %02x", lu16_Time);
+            
+            gnss_response();
+           
+        }
+        break;
+
+        case WIFI_TEST:
+        {
+            NRF_LOG_INFO("WIFI TEST START");
+        }
+        break;
+
+        case BLE_TEST:
+        {
+        }
+        break;
+
+        case RADIO_TEST:
+        {
+        }
+        break;
+
+        case LTE_TEST:
+        {
+        }
+        break;
+
+        case IR_TEST:
+        {
+        }
+        break;
+
+        case FLASH_MEMORY_TEST:
+        {
+        }
+        break;
+
+        case EPROM_TEST:
+        {
+        }
+        break;
+
+        case USB_AND_CHARGING_TEST:
+        {
+        }
+        break;
+
+        case TEMPERATURE_TEST:
+        {
+        }
+        break;
+
+        case ACCERLOMETER_TEST:
+        {
+        }
+        break;
+
+        default:
+        {
+            NRF_LOG_INFO("In valied command");
+        }
+        break;
+    }
+
+    memset(&gst_Uart, 0, sizeof(gst_Uart));
+}
+
+
+
+void req_ack(uint8_t error)
+{
+    uint8_t lu8_Tx_Data[100] = {0};
+    uint16_t lu8_Index = 0;
+    //uint16_t CRC = 0xFFFF;
+
+    lu8_Tx_Data[lu8_Index++] = (uint8_t)((gst_Uart.RX.DataLen) >> 8);
+    lu8_Tx_Data[lu8_Index++] = (uint8_t)((gst_Uart.RX.DataLen-3));
+
+    lu8_Tx_Data[lu8_Index++] = GNSS_TEST;
+    lu8_Tx_Data[lu8_Index++] = ACK;
+    lu8_Tx_Data[lu8_Index++] = error;
+
+    //CRC = crc_calculate(0xFFFF, lu8_Index, &lu8_Tx_Data[0]);
+
+    //lu8_Tx_Data[lu8_Index++] = (uint8_t)(CRC >> 8);
+    //lu8_Tx_Data[lu8_Index++] = (uint8_t)(CRC);
+
+  //  NRF_LOG_DEBUG("len : %d CRC : %02x ERROR : %d\n", lu8_Index, CRC, error);
+
+    UART_TxData((uint8_t *)&lu8_Tx_Data, lu8_Index);
+}
+
+
+
+void gnss_response(void)
+{
+    uint8_t lu8_Tx_Data[100] = {0};
+    uint16_t lu8_Index = 0;
+    uint16_t CRC = 0xFFFF;
+    char dummyloc[100] =
+        "$GNGGA,082954.16,2308.880715,N,07239.422743,E,1,04,2.9,99.9,M,-54.9,M,,*65\r\n";
+
+    lu8_Tx_Data[lu8_Index++] = 0;
+    lu8_Tx_Data[lu8_Index++] = 0;
+    lu8_Tx_Data[lu8_Index++] = GNSS_TEST;
+
+    memcpy(&lu8_Tx_Data[lu8_Index], &dummyloc[0], strlen(dummyloc));
+    lu8_Index += strlen(dummyloc);
+
+    lu8_Tx_Data[0] = (uint8_t)(lu8_Index >> 8);
+    lu8_Tx_Data[1] = (uint8_t)(lu8_Index);
+
+    CRC = crc_calculate(0xFFFF, lu8_Index, &lu8_Tx_Data[0]);
+
+    lu8_Tx_Data[lu8_Index++] = (uint8_t)(CRC >> 8);
+    lu8_Tx_Data[lu8_Index++] = (uint8_t)(CRC);
+
+    NRF_LOG_DEBUG("len : %d CRC : %02x", lu8_Index, CRC);
+
+    UART_TxData((uint8_t *)&lu8_Tx_Data, lu8_Index);
+}
+
+
+/**
+ * @brief uart main fuction to call`
+ */
+
+void UART_Data_Parser(void)
+{
+
+    if (true == gst_Uart.RX.isDataReceived)
+    {
+
+
+        if (true == uart_data_Valided())
+        {
+            req_ack(RECEVICE_SUCESS);
+            //uart_data_process();
+        }
+        else
+        {
+            req_ack(CRC_MISMATCH);
+        }
+        gst_Uart.RX.isDataReceived = false;
+    }
+}
